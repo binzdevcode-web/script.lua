@@ -1,42 +1,36 @@
 -- ═══════════════════════════════════════════════════
--- BREAK & STEAL AN EGG — AUTO-FARM SCRIPT
--- Chạy được trên: Delta, Fluxus, Arceus X (Mobile)
---                 Krnl, Synapse X, Fluxus PC
--- Features: Speed Hack, Auto Farm, Auto Tele, Anti-AFK
+-- BREAK & STEAL AN EGG — STEALTH AUTO-FARM (FIX 267)
+-- Chạy trên: Delta, Fluxus, Arceus X, Krnl, Wave, Solara
+-- Anti-Kick: Tween di chuyển, Clear Velocity, Random Delay
 -- ═══════════════════════════════════════════════════
 
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
-local UserInputService = game:GetService("UserInputService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
-local LP = Players.LocalPlayer
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local VirtualUser        = game:GetService("VirtualUser")
+local UserInputService   = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local LP                 = Players.LocalPlayer
 
 -- ═══════════════════════════════════════════════════
--- CONFIG
+-- CONFIG (Đã hạ mức để tránh Anti-Cheat 267)
 -- ═══════════════════════════════════════════════════
 local CONFIG = {
-    WALK_SPEED      = 150,
-    JUMP_POWER      = 120,
-    TP_OFFSET       = Vector3.new(0, 4, 0),
-    LOOP_DELAY      = 0.35,
-    TOUCH_DURATION  = 0.15,
-    SAFE_ZONE       = nil,   -- sẽ tự lấy vị trí hiện tại lúc bật script
-    USE_FIRE_TOUCH  = true,  -- bật nếu game cần "touch" để nhặt trứng
+    WALK_SPEED      = 55,     -- Max khuyên dùng: 55-60. Lên 100+ dễ bị 267
+    JUMP_POWER      = 65,     -- Mức an toàn
+    TP_DISTANCE_MAX = 250,    -- Bay tối đa 250 studs/lần, tránh flag
+    LOOP_DELAY      = 1.2,    -- Nghỉ 1.2s giữa các lần nhặt để tránh spam
+    RANDOM_DELAY    = 0.4,    -- Delay ngẫu nhiên thêm (chống pattern detect)
+    SAFE_ZONE       = nil,
+    USE_FIRE_TOUCH  = false,  -- Đặt false vì đôi khi firetouch cũng bị flag
 }
 
--- ═══════════════════════════════════════════════════
--- STATE
--- ═══════════════════════════════════════════════════
 local State = {
     AutoFarm  = false,
     AntiAFK   = true,
     SpeedHack = false,
     Collected = 0,
     Failed    = 0,
-    LastEgg   = nil,
+    Panic     = false,
 }
 
 -- ═══════════════════════════════════════════════════
@@ -53,21 +47,63 @@ end
 
 local function setSpeed(s)
     local _, hum = getCharacter()
-    if hum then hum.WalkSpeed = s end
+    if hum then 
+        pcall(function()
+            hum.WalkSpeed = s
+        end)
+    end
 end
 
 local function setJump(j)
     local _, hum = getCharacter()
     if hum then
-        pcall(function() hum.UseJumpPower = true end)
-        pcall(function() hum.JumpPower = j end)
+        pcall(function() 
+            hum.UseJumpPower = true 
+            hum.JumpPower = j 
+        end)
     end
 end
 
-local function teleportTo(cf)
-    local _, _, root = getCharacter()
-    if not root then return false end
-    pcall(function() root.CFrame = cf end)
+-- HÀM BAY MƯỢT (Không dùng CFrame Set trực tiếp nữa)
+local function stealthMove(targetPos)
+    if State.Panic then return false end
+    local _, hum, root = getCharacter()
+    if not hum or not root then return false end
+    
+    local currentPos = root.Position
+    local dist = (currentPos - targetPos).Magnitude
+    
+    -- Nếu khoảng cách quá xa, chia nhỏ để bay từng khúc
+    if dist > CONFIG.TP_DISTANCE_MAX then
+        local direction = (targetPos - currentPos).Unit
+        targetPos = currentPos + (direction * CONFIG.TP_DISTANCE_MAX)
+        dist = CONFIG.TP_DISTANCE_MAX
+    end
+
+    -- Xoá vận tốc cũ (Anti-cheat không thấy quán tính lạ)
+    pcall(function() 
+        root.Velocity = Vector3.zero 
+        root.AssemblyLinearVelocity = Vector3.zero
+    end)
+
+    -- Dùng Tween để bay mượt như đang chạy bình thường
+    local duration = math.clamp(dist / 160, 0.15, 0.8) -- Bay max 0.8s, min 0.15s
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+    
+    local success, err = pcall(function()
+        local tween = TweenService:Create(root, tweenInfo, {CFrame = CFrame.new(targetPos)})
+        tween:Play()
+        tween.Completed:Wait()
+    end)
+    
+    if not success then return false end
+    
+    -- Reset lần nữa cho chắc
+    pcall(function() 
+        root.Velocity = Vector3.zero 
+        root.AssemblyLinearVelocity = Vector3.zero
+    end)
+    
     return true
 end
 
@@ -76,15 +112,6 @@ local function isEggObject(obj)
     local name = string.lower(obj.Name)
     return string.find(name, "egg")   ~= nil
         or string.find(name, "trung") ~= nil
-        or string.find(name, "trứng") ~= nil
-end
-
-local function isSafeObject(obj)
-    local name = string.lower(obj.Name)
-    return string.find(name, "safe")  ~= nil
-        or string.find(name, "base")  ~= nil
-        or string.find(name, "spawn") ~= nil
-        or string.find(name, "home")  ~= nil
 end
 
 local function findEggs()
@@ -93,22 +120,14 @@ local function findEggs()
         if not obj or obj == LP.Character then return end
         if isEggObject(obj) then
             local part
-            if obj:IsA("BasePart") then
-                part = obj
-            elseif obj:IsA("Model") then
-                part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-            else
-                part = obj:FindFirstChildWhichIsA("BasePart")
-            end
-            if part and part.Parent then
-                table.insert(eggs, part)
-            end
+            if obj:IsA("BasePart") then part = obj
+            elseif obj:IsA("Model") then part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+            else part = obj:FindFirstChildWhichIsA("BasePart") end
+            if part and part.Parent then table.insert(eggs, part) end
             return
         end
         pcall(function()
-            for _, child in ipairs(obj:GetChildren()) do
-                scan(child)
-            end
+            for _, child in ipairs(obj:GetChildren()) do scan(child) end
         end)
     end
     scan(workspace)
@@ -127,14 +146,10 @@ local function pickBestEgg()
         local size = math.max(egg.Size.X, egg.Size.Y, egg.Size.Z)
         local rarity = 1
         pcall(function()
-            if egg:GetAttribute("Rarity") then
-                rarity = tonumber(egg:GetAttribute("Rarity")) or 1
-            elseif egg.Parent and egg.Parent:GetAttribute("Rarity") then
-                rarity = tonumber(egg.Parent:GetAttribute("Rarity")) or 1
-            end
+            if egg:GetAttribute("Rarity") then rarity = tonumber(egg:GetAttribute("Rarity")) or 1 end
         end)
-        -- score: ưu tiên to + hiếm, trừ khoảng cách
-        local score = (size * 8 * rarity) - (dist * 0.4)
+        -- Ưu tiên trứng gần trước để giảm rủi ro (Bay xa dễ bị detect)
+        local score = (size * 5 * rarity) - (dist * 2)
         if score > bestScore then
             bestScore = score
             best = egg
@@ -143,39 +158,8 @@ local function pickBestEgg()
     return best
 end
 
-local function fireTouch(part, st)
-    if not firetouchinterest then return false end
-    local _, _, root = getCharacter()
-    if not root then return false end
-    pcall(function() firetouchinterest(root, part, st) end)
-    return true
-end
-
-local function autoDetectSafeZone()
-    local _, _, root = getCharacter()
-    if not root then return nil end
-    local bestPos, bestDist = nil, math.huge
-    local function scan(obj)
-        if isSafeObject(obj) then
-            local part = obj:IsA("BasePart") and obj or (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart"))
-            if part then
-                local d = (root.Position - part.Position).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    bestPos  = part.Position
-                end
-            end
-        end
-        pcall(function()
-            for _, c in ipairs(obj:GetChildren()) do scan(c) end
-        end)
-    end
-    scan(workspace)
-    return bestPos
-end
-
 -- ═══════════════════════════════════════════════════
--- ANTI-AFK
+-- ANTI-AFK (Bypass loại này an toàn, không bị 267)
 -- ═══════════════════════════════════════════════════
 LP.Idled:Connect(function()
     if not State.AntiAFK then return end
@@ -185,50 +169,10 @@ LP.Idled:Connect(function()
     end)
 end)
 
--- fallback: gửi phím W định kỳ
-task.spawn(function()
-    while task.wait(30) do
-        if not State.AntiAFK then continue end
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(true,  "W", false, game)
-            task.wait(0.05)
-            VirtualInputManager:SendKeyEvent(false, "W", false, game)
-        end)
-    end
-end)
-
 -- ═══════════════════════════════════════════════════
--- CHARACTER RESPAWN → re-apply speed
--- ═══════════════════════════════════════════════════
-LP.CharacterAdded:Connect(function()
-    task.wait(1.5)
-    if State.SpeedHack then
-        setSpeed(CONFIG.WALK_SPEED)
-        setJump(CONFIG.JUMP_POWER)
-    end
-    if not CONFIG.SAFE_ZONE then
-        local _, _, root = getCharacter()
-        if root then CONFIG.SAFE_ZONE = root.CFrame end
-    end
-end)
-
--- giữ speed không bị game reset
-task.spawn(function()
-    while task.wait(1) do
-        if State.SpeedHack then
-            local _, hum = getCharacter()
-            if hum and hum.WalkSpeed ~= CONFIG.WALK_SPEED then
-                hum.WalkSpeed = CONFIG.WALK_SPEED
-            end
-        end
-    end
-end)
-
--- ═══════════════════════════════════════════════════
--- AUTO FARM LOOP
+-- AUTO FARM LOOP (Stealth Mode)
 -- ═══════════════════════════════════════════════════
 task.spawn(function()
-    -- lưu vị trí ban đầu làm safe zone
     task.wait(2)
     local _, _, root = getCharacter()
     if root and not CONFIG.SAFE_ZONE then
@@ -236,33 +180,41 @@ task.spawn(function()
     end
 
     while task.wait(CONFIG.LOOP_DELAY) do
-        if not State.AutoFarm then continue end
+        if not State.AutoFarm or State.Panic then continue end
         if not getCharacter() then continue end
 
         local egg = pickBestEgg()
         if not egg then
             State.Failed = State.Failed + 1
+            if updateGUI then updateGUI() end
             continue
         end
 
-        State.LastEgg = egg
+        -- Thêm delay ngẫu nhiên để tránh bị bắt pattern
+        task.wait(math.random() * CONFIG.RANDOM_DELAY)
 
-        -- 1. Teleport tới trứng
-        teleportTo(CFrame.new(egg.Position + CONFIG.TP_OFFSET))
-        task.wait(0.12)
+        -- 1. Bay tới trứng (bằng Tween)
+        stealthMove(egg.Position + Vector3.new(0, 3, 0))
+        task.wait(0.4)
 
-        -- 2. Touch để nhặt
+        -- 2. Nhặt trứng (chỉ dùng touch nếu bật)
         if CONFIG.USE_FIRE_TOUCH and firetouchinterest then
-            fireTouch(egg, 0)
-            task.wait(CONFIG.TOUCH_DURATION)
-            fireTouch(egg, 1)
+            pcall(function()
+                local _, _, root2 = getCharacter()
+                if root2 then
+                    firetouchinterest(root2, egg, 0)
+                    task.wait(0.1)
+                    firetouchinterest(root2, egg, 1)
+                end
+            end)
+        else
+            -- Đứng đè lên trứng tự nhặt
+            task.wait(0.3)
         end
-        task.wait(0.15)
 
-        -- 3. Teleport về safe zone
+        -- 3. Bay về safe zone
         if CONFIG.SAFE_ZONE then
-            teleportTo(CONFIG.SAFE_ZONE)
-            task.wait(0.15)
+            stealthMove(CONFIG.SAFE_ZONE.Position)
         end
 
         State.Collected = State.Collected + 1
@@ -270,116 +222,105 @@ task.spawn(function()
     end
 end)
 
+-- Reset Speed nếu bị kéo về
+task.spawn(function()
+    while task.wait(1) do
+        if State.SpeedHack and not State.Panic then
+            local _, hum = getCharacter()
+            if hum and hum.WalkSpeed ~= CONFIG.WALK_SPEED then
+                pcall(function() hum.WalkSpeed = CONFIG.WALK_SPEED end)
+            end
+        end
+    end
+end)
+
 -- ═══════════════════════════════════════════════════
 -- GUI
 -- ═══════════════════════════════════════════════════
 local CoreGui = pcall(function() return game:GetService("CoreGui") end) and game:GetService("CoreGui") or game.Players.LocalPlayer:WaitForChild("PlayerGui")
-
-if CoreGui:FindFirstChild("EggFarmGUI") then
-    CoreGui.EggFarmGUI:Destroy()
-end
+if CoreGui:FindFirstChild("EggFarmGUI") then CoreGui.EggFarmGUI:Destroy() end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name           = "EggFarmGUI"
-ScreenGui.ResetOnSpawn    = false
-ScreenGui.IgnoreGuiInset  = true
-ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent          = CoreGui
+ScreenGui.Name = "EggFarmGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
 
--- Nút nhỏ mở panel (mobile-friendly)
 local MiniBtn = Instance.new("TextButton")
-MiniBtn.Name              = "MiniBtn"
-MiniBtn.Size              = UDim2.new(0, 64, 0, 64)
-MiniBtn.Position          = UDim2.new(0, 20, 0.5, -32)
-MiniBtn.BackgroundColor3  = Color3.fromRGB(201, 71, 104)
-MiniBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
-MiniBtn.Text              = "🥚"
-MiniBtn.TextScaled        = true
-MiniBtn.Font              = Enum.Font.GothamBold
-MiniBtn.BorderSizePixel   = 0
-MiniBtn.AutoButtonColor   = false
-MiniBtn.Parent            = ScreenGui
+MiniBtn.Size = UDim2.new(0, 64, 0, 64)
+MiniBtn.Position = UDim2.new(0, 20, 0.5, -32)
+MiniBtn.BackgroundColor3 = Color3.fromRGB(201, 71, 104)
+MiniBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MiniBtn.Text = "🥚"
+MiniBtn.TextScaled = true
+MiniBtn.Font = Enum.Font.GothamBold
+MiniBtn.BorderSizePixel = 0
+MiniBtn.Parent = ScreenGui
 Instance.new("UICorner", MiniBtn).CornerRadius = UDim.new(1, 0)
 
-local miniStroke = Instance.new("UIStroke", MiniBtn)
-miniStroke.Color = Color3.fromRGB(255, 200, 220)
-miniStroke.Thickness = 2
-miniStroke.Transparency = 0.4
-
--- Panel chính
 local Main = Instance.new("Frame")
-Main.Name              = "Main"
-Main.Size              = UDim2.new(0, 300, 0, 400)
-Main.Position          = UDim2.new(0.5, -150, 0.5, -200)
-Main.BackgroundColor3  = Color3.fromRGB(28, 18, 26)
-Main.BorderSizePixel   = 0
-Main.Visible           = false
-Main.Parent            = ScreenGui
+Main.Size = UDim2.new(0, 300, 0, 430)
+Main.Position = UDim2.new(0.5, -150, 0.5, -215)
+Main.BackgroundColor3 = Color3.fromRGB(28, 18, 26)
+Main.BorderSizePixel = 0
+Main.Visible = false
+Main.Parent = ScreenGui
 Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 14)
 
-local mainStroke = Instance.new("UIStroke", Main)
-mainStroke.Color = Color3.fromRGB(201, 71, 104)
-mainStroke.Thickness = 1.5
-mainStroke.Transparency = 0.5
-
--- Title bar
 local Title = Instance.new("Frame")
-Title.Size             = UDim2.new(1, 0, 0, 44)
+Title.Size = UDim2.new(1, 0, 0, 44)
 Title.BackgroundColor3 = Color3.fromRGB(60, 30, 50)
-Title.BorderSizePixel  = 0
-Title.Parent           = Main
+Title.BorderSizePixel = 0
+Title.Parent = Main
 Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 14)
 
 local TitleFix = Instance.new("Frame")
-TitleFix.Size              = UDim2.new(1, 0, 0, 22)
-TitleFix.Position          = UDim2.new(0, 0, 0, 22)
-TitleFix.BackgroundColor3  = Color3.fromRGB(60, 30, 50)
-TitleFix.BorderSizePixel   = 0
-TitleFix.Parent            = Title
+TitleFix.Size = UDim2.new(1, 0, 0, 22)
+TitleFix.Position = UDim2.new(0, 0, 0, 22)
+TitleFix.BackgroundColor3 = Color3.fromRGB(60, 30, 50)
+TitleFix.BorderSizePixel = 0
+TitleFix.Parent = Title
 
 local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size                = UDim2.new(1, -50, 1, 0)
-TitleLabel.Position            = UDim2.new(0, 16, 0, 0)
+TitleLabel.Size = UDim2.new(1, -50, 1, 0)
+TitleLabel.Position = UDim2.new(0, 16, 0, 0)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text                = "🥚  EGG FARMER"
-TitleLabel.TextColor3          = Color3.fromRGB(255, 220, 230)
-TitleLabel.TextXAlignment      = Enum.TextXAlignment.Left
-TitleLabel.Font                = Enum.Font.GothamBold
-TitleLabel.TextSize            = 15
-TitleLabel.Parent              = Title
+TitleLabel.Text = "🥚 STEALTH FARMER"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 220, 230)
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 15
+TitleLabel.Parent = Title
 
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size              = UDim2.new(0, 32, 0, 32)
-CloseBtn.Position          = UDim2.new(1, -40, 0, 6)
-CloseBtn.BackgroundColor3  = Color3.fromRGB(200, 60, 80)
-CloseBtn.Text              = "✕"
-CloseBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
-CloseBtn.Font              = Enum.Font.GothamBold
-CloseBtn.TextSize          = 16
-CloseBtn.BorderSizePixel   = 0
-CloseBtn.AutoButtonColor   = false
-CloseBtn.Parent            = Title
+CloseBtn.Size = UDim2.new(0, 32, 0, 32)
+CloseBtn.Position = UDim2.new(1, -40, 0, 6)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 80)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 16
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Parent = Title
 Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(1, 0)
 
--- Nội dung
 local List = Instance.new("Frame")
-List.Size                = UDim2.new(1, -24, 1, -60)
-List.Position            = UDim2.new(0, 12, 0, 56)
+List.Size = UDim2.new(1, -24, 1, -60)
+List.Position = UDim2.new(0, 12, 0, 56)
 List.BackgroundTransparency = 1
-List.Parent              = Main
+List.Parent = Main
 
 local function makeBtn(y, h)
     local b = Instance.new("TextButton")
-    b.Size              = UDim2.new(1, 0, 0, h or 48)
-    b.Position          = UDim2.new(0, 0, 0, y)
-    b.BackgroundColor3  = Color3.fromRGB(50, 35, 50)
-    b.Text              = ""
-    b.TextColor3        = Color3.fromRGB(255, 255, 255)
-    b.Font              = Enum.Font.GothamMedium
-    b.TextSize          = 14
-    b.BorderSizePixel   = 0
-    b.AutoButtonColor   = false
-    b.Parent            = List
+    b.Size = UDim2.new(1, 0, 0, h or 48)
+    b.Position = UDim2.new(0, 0, 0, y)
+    b.BackgroundColor3 = Color3.fromRGB(50, 35, 50)
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 14
+    b.BorderSizePixel = 0
+    b.Parent = List
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
     return b
 end
@@ -388,81 +329,75 @@ local SpeedBtn = makeBtn(0)
 local FarmBtn  = makeBtn(58)
 local AFKBtn   = makeBtn(116)
 local SafeBtn  = makeBtn(174)
+local PanicBtn = makeBtn(232, 40) -- Nút PANIC màu đỏ
 
--- Stats
+PanicBtn.BackgroundColor3 = Color3.fromRGB(140, 30, 40)
+PanicBtn.Text = "🛑 PANIC STOP (Ẩn & Dừng)"
+PanicBtn.Font = Enum.Font.GothamBold
+
 local Stats = Instance.new("TextLabel")
-Stats.Size              = UDim2.new(1, 0, 0, 46)
-Stats.Position          = UDim2.new(0, 0, 0, 234)
-Stats.BackgroundColor3  = Color3.fromRGB(40, 25, 40)
-Stats.TextColor3        = Color3.fromRGB(220, 200, 220)
-Stats.Font              = Enum.Font.Gotham
-Stats.TextSize          = 13
-Stats.BorderSizePixel   = 0
-Stats.Text              = "  Chưa lấy được trứng nào"
-Stats.TextXAlignment    = Enum.TextXAlignment.Left
-Stats.Parent            = List
+Stats.Size = UDim2.new(1, 0, 0, 46)
+Stats.Position = UDim2.new(0, 0, 0, 284)
+Stats.BackgroundColor3 = Color3.fromRGB(40, 25, 40)
+Stats.TextColor3 = Color3.fromRGB(220, 200, 220)
+Stats.Font = Enum.Font.Gotham
+Stats.TextSize = 13
+Stats.BorderSizePixel = 0
+Stats.TextXAlignment = Enum.TextXAlignment.Left
+Stats.Parent = List
 Instance.new("UICorner", Stats).CornerRadius = UDim.new(0, 10)
 
--- Log
 local LogLbl = Instance.new("TextLabel")
-LogLbl.Size             = UDim2.new(1, 0, 0, 60)
-LogLbl.Position         = UDim2.new(0, 0, 0, 288)
+LogLbl.Size = UDim2.new(1, 0, 0, 60)
+LogLbl.Position = UDim2.new(0, 0, 0, 338)
 LogLbl.BackgroundColor3 = Color3.fromRGB(25, 15, 25)
-LogLbl.TextColor3       = Color3.fromRGB(160, 150, 170)
-LogLbl.Font             = Enum.Font.Code
-LogLbl.TextSize         = 11
-LogLbl.BorderSizePixel  = 0
-LogLbl.Text             = "  > sẵn sàng"
-LogLbl.TextXAlignment   = Enum.TextXAlignment.Left
-LogLbl.TextYAlignment   = Enum.TextYAlignment.Top
-LogLbl.TextWrapped      = true
-LogLbl.Parent           = List
+LogLbl.TextColor3 = Color3.fromRGB(160, 150, 170)
+LogLbl.Font = Enum.Font.Code
+LogLbl.TextSize = 11
+LogLbl.BorderSizePixel = 0
+LogLbl.TextXAlignment = Enum.TextXAlignment.Left
+LogLbl.TextYAlignment = Enum.TextYAlignment.Top
+LogLbl.TextWrapped = true
+LogLbl.Parent = List
 Instance.new("UICorner", LogLbl).CornerRadius = UDim.new(0, 10)
 
-local function log(msg)
-    LogLbl.Text = "  > " .. msg
-end
+local function log(msg) LogLbl.Text = "  > " .. msg end
+function updateGUI() Stats.Text = "  🥚 Đã lấy: " .. State.Collected .. "  •  Lỗi: " .. State.Failed end
 
-function updateGUI()
-    Stats.Text = "  🥚 Đã lấy: " .. State.Collected .. "  •  Lỗi: " .. State.Failed
-end
-
--- Update trạng thái nút
 local function setBtnState(btn, label, on)
     btn.Text = label .. (on and "   [ON]" or "   [OFF]")
     btn.BackgroundColor3 = on and Color3.fromRGB(80, 150, 100) or Color3.fromRGB(50, 35, 50)
 end
 
-setBtnState(SpeedBtn, "⚡  Speed Hack", false)
-setBtnState(FarmBtn,  "🌾  Auto Farm",  false)
-setBtnState(AFKBtn,   "💤  Anti AFK",   true)
-SafeBtn.Text = "📍  Đặt vùng an toàn"
+setBtnState(SpeedBtn, "⚡ Speed (An Toàn)", false)
+setBtnState(FarmBtn,  "🌾 Auto Farm (Stealth)", false)
+setBtnState(AFKBtn,   "💤 Anti AFK",   true)
+SafeBtn.Text = "📍 Đặt vùng an toàn"
 SafeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
 
--- Handlers
 SpeedBtn.MouseButton1Click:Connect(function()
     State.SpeedHack = not State.SpeedHack
-    setBtnState(SpeedBtn, "⚡  Speed Hack", State.SpeedHack)
+    setBtnState(SpeedBtn, "⚡ Speed (An Toàn)", State.SpeedHack)
     if State.SpeedHack then
         setSpeed(CONFIG.WALK_SPEED)
         setJump(CONFIG.JUMP_POWER)
-        log("speed hack bật: " .. CONFIG.WALK_SPEED)
+        log("speed 55 (an toàn)")
     else
         setSpeed(16)
         setJump(50)
-        log("speed hack tắt")
+        log("speed tắt")
     end
 end)
 
 FarmBtn.MouseButton1Click:Connect(function()
     State.AutoFarm = not State.AutoFarm
-    setBtnState(FarmBtn, "🌾  Auto Farm", State.AutoFarm)
-    log(State.AutoFarm and "bắt đầu farm trứng..." or "dừng farm")
+    setBtnState(FarmBtn, "🌾 Auto Farm (Stealth)", State.AutoFarm)
+    log(State.AutoFarm and "bắt đầu farm (bay mượt)..." or "dừng farm")
 end)
 
 AFKBtn.MouseButton1Click:Connect(function()
     State.AntiAFK = not State.AntiAFK
-    setBtnState(AFKBtn, "💤  Anti AFK", State.AntiAFK)
+    setBtnState(AFKBtn, "💤 Anti AFK", State.AntiAFK)
     log(State.AntiAFK and "anti-afk bật" or "anti-afk tắt")
 end)
 
@@ -470,12 +405,27 @@ SafeBtn.MouseButton1Click:Connect(function()
     local _, _, root = getCharacter()
     if root then
         CONFIG.SAFE_ZONE = root.CFrame
-        SafeBtn.Text = "📍  Đã đặt vùng an toàn ✓"
-        log("safe zone: " .. tostring(math.floor(root.Position.X)) .. ", " .. tostring(math.floor(root.Position.Z)))
-        task.delay(2, function()
-            SafeBtn.Text = "📍  Đặt vùng an toàn"
-        end)
+        SafeBtn.Text = "📍 Đã đặt vùng an toàn ✓"
+        log("đã đặt safe zone")
+        task.delay(2, function() SafeBtn.Text = "📍 Đặt vùng an toàn" end)
     end
+end)
+
+PanicBtn.MouseButton1Click:Connect(function()
+    State.Panic = true
+    State.AutoFarm = false
+    State.SpeedHack = false
+    setSpeed(16)
+    setJump(50)
+    setBtnState(FarmBtn, "🌾 Auto Farm (Stealth)", false)
+    setBtnState(SpeedBtn, "⚡ Speed (An Toàn)", false)
+    log("PANIC: Đã dừng & reset speed")
+    Main.Visible = false
+    MiniBtn.Visible = true
+    task.delay(10, function()
+        State.Panic = false 
+        log("sẵn sàng hoạt động lại")
+    end)
 end)
 
 MiniBtn.MouseButton1Click:Connect(function()
@@ -488,34 +438,25 @@ CloseBtn.MouseButton1Click:Connect(function()
     MiniBtn.Visible = true
 end)
 
--- Drag cho PC + Mobile
+-- Drag GUI
 local dragging, dragStart, startPos
 Title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
-        startPos  = Main.Position
+        startPos = Main.Position
         input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
         end)
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-    or input.UserInputType == Enum.UserInputType.Touch) then
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
-        Main.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
     end
 end)
 
--- ─── INIT ───
-log("script đã tải ✓ bấm 🥚 để mở panel")
+log("script Stealth đã tải ✓")
 updateGUI()
-print("[Egg Farmer] loaded. Click 🥚 to open.")
